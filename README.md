@@ -1,6 +1,6 @@
 # ERAP BMD & Muscle Composition Analysis Pipeline
 
-Analysis pipeline for quantifying bone mineral density, muscle composition, and adipose tissue from CT imaging data in the **ERAP clinical trial** — a Phase IIa study evaluating rapamycin treatment in early-stage Alzheimer's disease.
+Analysis pipeline for quantifying bone mineral density, muscle composition, and adipose tissue from CT imaging data in the **ERAP clinical trial** — a pilot study evaluating rapamycin treatment in early-stage Alzheimer's disease.
 
 ## Background
 
@@ -30,7 +30,6 @@ Each scan includes a **density calibration phantom** (Mindways QCT) in the field
 | Metric | Unit | Description |
 |--------|------|-------------|
 | `L1L2_vBMD_mean_mgcm3` | mg/cm3 | Primary endpoint — phantom-calibrated trabecular BMD |
-| `L1_vBMD_mean_mgcm3` | mg/cm3 | Individual vertebra BMD |
 | `L1_trabecular_volume_cm3` | cm3 | Eroded trabecular region volume |
 
 **Muscle (erector spinae at L1-L2 level):**
@@ -42,7 +41,7 @@ Each scan includes a **density calibration phantom** (Mindways QCT) in the field
 | `IMAT_percent` | % | Intermuscular adipose tissue (-190 to -30 HU) |
 | `muscle_tissue_volume_cm3` | cm3 | Muscle mass |
 
-**Adipose:**
+**Adipose (experimental - module still under construction):**
 
 | Metric | Unit | Description |
 |--------|------|-------------|
@@ -133,9 +132,7 @@ Outputs/
 
 ## Development
 
-This pipeline was developed collaboratively using [Claude Code](https://claude.ai/code) (Anthropic) and is maintained by the [Sigray Lab](https://github.com/Sigray-Lab) at Karolinska Institutet.
-
-See also the companion pipeline for periodontal FDG-PET analysis from the same trial: [ERAP-periodontal-analysis](https://github.com/Sigray-Lab/ERAP-periodontal-analysis).
+This pipeline was developed  using Claude Code (Anthropic) and is maintained by the [Sigray Lab](https://github.com/Sigray-Lab) at Karolinska Institutet.
 
 ## References
 
@@ -144,4 +141,4 @@ See also the companion pipeline for periodontal FDG-PET analysis from the same t
 
 ## License
 
-This project is part of the ERAP clinical trial. Raw imaging data are not included in this repository due to patient privacy regulations.
+This project is part of the ERAP clinical trial. Raw imaging data are not included in this repository. 
