@@ -1,0 +1,54 @@
+# ============================================================
+# ERAP BMD & Muscle Analysis - Git Ignore
+# ============================================================
+# Only Scripts/ and README are tracked. All data, derived
+# outputs, and sensitive files are excluded.
+# ============================================================
+
+# === Patient Data & Derived Outputs (NEVER commit) ===
+DerivedData/
+QC/
+Log/
+Outputs/
+calibration_hu/
+manual_overrides/
+RawData/
+BlindKey/
+
+# === Project documentation with sensitive info ===
+CLAUDE.md
+
+# === Deprecated files ===
+old/
+
+# === Python artifacts ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# === Jupyter ===
+.ipynb_checkpoints/
+
+# === macOS generated files ===
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# === IDE / Editor files ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# === Temporary files ===
+*.tmp
+*.bak
+*.log
+~$*
