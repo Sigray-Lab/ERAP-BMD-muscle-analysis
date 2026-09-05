@@ -53,3 +53,7 @@ build/
 *.bak
 *.log
 ~$*
+
+# === Review material (contains local paths and names; kept out of the public repo) ===
+Review_adversarial/
+ADVERSARIAL_REVIEW_PROMPT.md
