@@ -4,7 +4,13 @@ Compare automatic pipeline BMD against manual physicist measurements.
 
 Manual data: RawData/bmd_ct/BMD_manual/results.xlsx
   - Sheet 'mean_mgml': per-subject mean trabecular vBMD (mg/cm³)
-  - kota1 = L1 (cranial vertebra), kota2 = L2 (caudal vertebra)
+  - kota1 / kota2: which physical vertebra each refers to is taken from
+    Scripts/manual_kota_mapping.csv (per subject, with evidence grade).
+    The 2026-09 review showed kota1 is the INFERIOR vertebra (pipeline L2)
+    in all 9 subjects with ImageJ screenshots; the earlier assumption
+    kota1 = cranial was wrong. The 4 subjects without screenshots use the
+    same convention, graded "assumed"; statistics are reported for all 13
+    and for the confirmed subset.
   - _b = baseline, _f = follow-up
 
 Pipeline data: Outputs/results.csv
@@ -26,6 +32,7 @@ from scipy import stats
 
 ROOT = Path(__file__).resolve().parent.parent
 MANUAL_XLSX = ROOT.parent / "RawData" / "bmd_ct" / "BMD_manual" / "results.xlsx"
+MAPPING_CSV = ROOT / "Scripts" / "manual_kota_mapping.csv"
 PIPELINE_CSV = ROOT / "Outputs" / "results.csv"
 OUT_DIR = ROOT / "QC" / "manual_validation"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -39,14 +46,27 @@ def load_manual():
     # Drop summary rows (Medel, SD, p, blanks)
     df = df[df["subject_id"].astype(str).str.startswith("sub-")].copy()
     df["subject_id"] = df["subject_id"].astype(str).str.strip()
-    # Rename for clarity: kota1=L1, kota2=L2
-    out = pd.DataFrame({
+    kota = pd.DataFrame({
         "subject_id": df["subject_id"].values,
-        "manual_L1_baseline": pd.to_numeric(df.iloc[:, 1], errors="coerce").values,
-        "manual_L1_followup": pd.to_numeric(df.iloc[:, 2], errors="coerce").values,
-        "manual_L2_baseline": pd.to_numeric(df.iloc[:, 4], errors="coerce").values,
-        "manual_L2_followup": pd.to_numeric(df.iloc[:, 5], errors="coerce").values,
+        "kota1_baseline": pd.to_numeric(df.iloc[:, 1], errors="coerce").values,
+        "kota1_followup": pd.to_numeric(df.iloc[:, 2], errors="coerce").values,
+        "kota2_baseline": pd.to_numeric(df.iloc[:, 4], errors="coerce").values,
+        "kota2_followup": pd.to_numeric(df.iloc[:, 5], errors="coerce").values,
     })
+    # Per-subject physical mapping (pipeline L1 = superior body, L2 = inferior body)
+    mapping = pd.read_csv(MAPPING_CSV)
+    missing = set(kota["subject_id"]) - set(mapping["subject_id"])
+    if missing:
+        raise ValueError(f"No kota mapping for {sorted(missing)} in {MAPPING_CSV.name}")
+    kota = kota.merge(mapping, on="subject_id", how="left")
+    k1_inf = kota["kota1_is"].eq("inferior")
+    out = pd.DataFrame({"subject_id": kota["subject_id"]})
+    for ses in ["baseline", "followup"]:
+        out[f"manual_L1_{ses}"] = np.where(k1_inf, kota[f"kota2_{ses}"], kota[f"kota1_{ses}"])
+        out[f"manual_L2_{ses}"] = np.where(k1_inf, kota[f"kota1_{ses}"], kota[f"kota2_{ses}"])
+    out["kota1_is"] = kota["kota1_is"].values
+    out["mapping_evidence"] = kota["evidence"].values
+    out["mapping_confirmed"] = kota["evidence"].str.startswith("confirmed").values
     return out
 
 
@@ -202,10 +222,33 @@ def main():
     plt.close(fig)
 
     # --- Save summary CSV ---
+    for row in stats_rows:
+        row["subset"] = "all_13"
+
+    # --- Same level-specific comparisons on the screenshot-confirmed subset ---
+    conf = merged[merged["mapping_confirmed"]]
+    level_pairs = [
+        ("L1 Baseline", "manual_L1_baseline", "pre_L1_vBMD_mean_mgcm3"),
+        ("L1 Follow-up", "manual_L1_followup", "post_L1_vBMD_mean_mgcm3"),
+        ("L2 Baseline", "manual_L2_baseline", "pre_L2_vBMD_mean_mgcm3"),
+        ("L2 Follow-up", "manual_L2_followup", "post_L2_vBMD_mean_mgcm3"),
+        ("Δ L1 Change", "manual_L1_change", "pipe_L1_change"),
+        ("Δ L2 Change", "manual_L2_change", "pipe_L2_change"),
+        ("Δ L1-L2 Mean Change", "manual_L1L2_change", "pipe_L1L2_change"),
+    ]
+    for label, mc, pc in level_pairs:
+        m, p = conf[mc].values, conf[pc].values
+        slope, intercept, r, _, _ = stats.linregress(m, p)
+        stats_rows.append({"label": label, "n": len(m), "R2": r ** 2, "slope": slope,
+                           "intercept": intercept, "bias": np.mean(p - m),
+                           "MAD": np.mean(np.abs(p - m)), "RMSE": np.sqrt(np.mean((p - m) ** 2)),
+                           "subset": "confirmed_mapping_only"})
+
     stats_df = pd.DataFrame(stats_rows)
     stats_df.to_csv(OUT_DIR / "comparison_summary.csv", index=False, float_format="%.4f")
 
     # --- Print report ---
+    n_conf = int(merged["mapping_confirmed"].sum())
     report = []
     report.append("=" * 65)
     report.append("MANUAL vs PIPELINE BMD VALIDATION REPORT")
@@ -213,22 +256,31 @@ def main():
     report.append(f"Subjects matched: {len(merged)}")
     report.append(f"Manual source: {MANUAL_XLSX.name}")
     report.append(f"Pipeline source: {PIPELINE_CSV.name}")
+    report.append(f"Mapping source: {MAPPING_CSV.name}")
     report.append("")
-    report.append("Mapping: kota1 → L1 (cranial), kota2 → L2 (caudal)")
+    report.append("Mapping: per subject from manual_kota_mapping.csv. In all subjects kota1 = INFERIOR")
+    report.append("body (pipeline L2) and kota2 = SUPERIOR body (pipeline L1).")
+    report.append(f"Evidence: screenshot-confirmed in {n_conf}/{len(merged)} subjects; assumed (same convention,")
+    report.append("supported by per-slice HU profile matching) in: "
+                  + ", ".join(merged.loc[~merged["mapping_confirmed"], "subject_id"]))
+    report.append("The L1-L2 mean change comparison does not depend on the mapping.")
     report.append("")
-    report.append(f"{'Comparison':<25} {'n':>3} {'R²':>7} {'Bias':>8} {'MAD':>7} {'RMSE':>7}")
-    report.append("-" * 65)
-    for _, r in stats_df.iterrows():
-        report.append(f"{r['label']:<25} {int(r['n']):>3} {r['R2']:>7.3f} {r['bias']:>+8.2f} {r['MAD']:>7.2f} {r['RMSE']:>7.2f}")
-    report.append("")
+    for subset, title in [("all_13", f"All subjects (n={len(merged)})"),
+                          ("confirmed_mapping_only", f"Screenshot-confirmed mapping only (n={n_conf})")]:
+        report.append(title)
+        report.append(f"{'Comparison':<25} {'n':>3} {'R²':>7} {'Bias':>8} {'MAD':>7} {'RMSE':>7}")
+        report.append("-" * 65)
+        for _, r in stats_df[stats_df["subset"] == subset].iterrows():
+            report.append(f"{r['label']:<25} {int(r['n']):>3} {r['R2']:>7.3f} {r['bias']:>+8.2f} {r['MAD']:>7.2f} {r['RMSE']:>7.2f}")
+        report.append("")
 
     # Per-subject comparison table
-    report.append("Per-subject absolute values (mg/cm³):")
+    report.append("Per-subject absolute values (mg/cm³); * = mapping assumed, not screenshot-confirmed:")
     report.append(f"{'Subject':<10} {'Man L1b':>8} {'Pip L1b':>8} {'Man L2b':>8} {'Pip L2b':>8} {'Man L1f':>8} {'Pip L1f':>8} {'Man L2f':>8} {'Pip L2f':>8}")
     report.append("-" * 82)
     for _, r in merged.iterrows():
         report.append(
-            f"{r['subject_id']:<10} "
+            f"{r['subject_id'] + ('' if r['mapping_confirmed'] else '*'):<10} "
             f"{r['manual_L1_baseline']:>8.1f} {r['pre_L1_vBMD_mean_mgcm3']:>8.1f} "
             f"{r['manual_L2_baseline']:>8.1f} {r['pre_L2_vBMD_mean_mgcm3']:>8.1f} "
             f"{r['manual_L1_followup']:>8.1f} {r['post_L1_vBMD_mean_mgcm3']:>8.1f} "

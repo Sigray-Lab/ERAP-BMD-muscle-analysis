@@ -1,0 +1,14 @@
+subject_id,kota1_is,evidence
+sub-101,inferior,confirmed: ImageJ screenshot slice 19-24/65 maps into pipeline inferior body (2026-09-05 review; slice order verified by rendering sub-109)
+sub-102,inferior,confirmed: ImageJ screenshot slice 19-20/65 maps into pipeline inferior body
+sub-103,inferior,assumed: no screenshot; per-slice HU profile of kota2 matches superior body (r=0.79) better than kota1 (r=0.24)
+sub-104,inferior,assumed: no screenshot; kota2 profile matches superior body (r=0.77/0.93); absolute values fit swap
+sub-105,inferior,confirmed: kota2 screenshot slice 50-53/65 maps into pipeline superior body
+sub-107,inferior,confirmed: ImageJ screenshot slice 21-23/65 maps into pipeline inferior body
+sub-108,inferior,confirmed: ImageJ screenshot slice 22-23/65 maps into pipeline inferior body
+sub-109,inferior,"confirmed: slice 20/65 rendered and matched to screenshot (aortic calcification, spinous process); kota2 at 46-48/65"
+sub-110,inferior,assumed: no screenshot; kota2 profile matches superior body (r=0.78/0.75)
+sub-111,inferior,confirmed: ImageJ screenshot slice 16-22/65 maps into pipeline inferior body
+sub-112,inferior,assumed: no screenshot; profile match ambiguous; absolute values fit swap (kota2 108/113 vs superior 111/114)
+sub-113,inferior,confirmed: ImageJ screenshot slice 23-26/65 maps into pipeline inferior body
+sub-114,inferior,confirmed: ImageJ screenshot slice 17-18/65 maps into pipeline inferior (z-split lower) body
