@@ -109,17 +109,26 @@ def already_done(out: Path) -> bool:
         return False
 
 
+def segment_vertebral_bodies(ct: Path, out: Path, root: Path, force: bool = False, log=print) -> int:
+    """Run the vertebrae_body task for one CT into `out` (with manifest). Returns 0 on success."""
+    return _run(ct, Path(out), Path(root), force, log, label=f"{Path(ct).name}")
+
+
 def run_session(sub: str, ses: str, data_dir: Path, root: Path, force: bool, log):
     ct = find_ct(data_dir, sub, ses)
     out = root / "DerivedData" / sub / ses / "segmentations" / OUT_SUBDIR
+    return _run(ct, out, root, force, log, label=f"{sub}/{ses}")
+
+
+def _run(ct: Path, out: Path, root: Path, force: bool, log, label: str) -> int:
     out.mkdir(parents=True, exist_ok=True)
     if already_done(out) and not force:
-        log(f"{sub}/{ses}: exists, skipping")
+        log(f"{label}: exists, skipping")
         return 0
 
     cmd = [sys.executable, "-B", str(Path(__file__).resolve()), "--worker",
            "--ct", str(ct), "--out", str(out), "--root", str(root)]
-    log(f"{sub}/{ses}: START  {ct.name}")
+    log(f"{label}: START  {ct.name}")
     t0 = time.time()
     with open(out / "invocation.log", "w") as f:
         f.write("COMMAND " + " ".join(cmd) + "\n")
@@ -145,7 +154,7 @@ def run_session(sub: str, ses: str, data_dir: Path, root: Path, force: bool, log
         "script": Path(__file__).name,
     }
     json.dump(manifest, open(out / "manifest.json", "w"), indent=2)
-    log(f"{sub}/{ses}: {'OK' if ok else 'FAILED'}  exit={code}  {dt:.0f}s")
+    log(f"{label}: {'OK' if ok else 'FAILED'}  exit={code}  {dt:.0f}s")
     return 0 if ok else 1
 
 

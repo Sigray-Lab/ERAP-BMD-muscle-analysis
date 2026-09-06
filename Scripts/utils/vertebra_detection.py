@@ -373,47 +373,75 @@ def save_detection_result(result: VertebraDetectionResult, output_path: Path):
 def standardize_vertebrae(
     detection_result: VertebraDetectionResult,
     output_dir: Path,
-    isolate_body_func=None
+    isolate_body_func=None,
+    body_mask_path: Optional[Path] = None
 ) -> Dict[str, Path]:
     """
-    Create standardized L1/L2 vertebral body files from detection result.
+    Create standardized L1/L2 vertebral body files from the detection result.
 
-    Args:
-        detection_result: Output from detect_central_vertebrae()
-        output_dir: Directory for output files
-        isolate_body_func: Optional function to isolate vertebral body.
-                          If None, uses raw mask.
+    Preferred path (2026-09, review F01): `body_mask_path` points to the
+    TotalSegmentator `vertebrae_body` mask; the body instances are split,
+    assigned to the two selected vertebrae by overlap (so subject overrides
+    such as the sub-114 Z-split still decide WHICH vertebrae), and the 10 %
+    endplate exclusion is applied to the body z-extent. A body_isolation.json
+    QC record is written next to the masks.
+
+    Legacy path: `isolate_body_func` (largest connected component per slice of
+    the whole-vertebra label). It keeps the posterior arch in pedicle slices and
+    is retained only for reproducing the pre-review results.
 
     Returns:
-        Dictionary with paths to standardized files
+        Dictionary with paths to L1_body.nii.gz / L2_body.nii.gz
     """
+    import json as _json
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-
     outputs = {}
+    pairs = [(detection_result.l1_info, "L1"), (detection_result.l2_info, "L2")]
 
-    for vertebra, standardized_name in [
-        (detection_result.l1_info, "L1"),
-        (detection_result.l2_info, "L2")
-    ]:
+    if body_mask_path is not None and Path(body_mask_path).exists():
+        from utils.body_isolation import isolate_bodies
+        label_masks, ref_nii = {}, None
+        for vertebra, name in pairs:
+            if vertebra is None:
+                raise ValueError(f"detection result has no {name}")
+            ref_nii = nib.load(vertebra.nifti_path)
+            label_masks[name] = np.asarray(ref_nii.dataobj) > 0
+        body = np.asarray(nib.load(body_mask_path).dataobj) > 0
+        spacing = tuple(float(v) for v in ref_nii.header.get_zooms()[:3])
+        bodies, res = isolate_bodies(body, label_masks, spacing)
+        record = {
+            "method": "vertebrae_body instance assigned to the selected vertebra label by overlap; "
+                      "10% endplate exclusion on the body z-extent",
+            "source_body_mask": str(body_mask_path),
+            "selected_labels": {name: v.original_label for v, name in pairs},
+            "result": res.to_dict(),
+        }
+        with open(output_dir / "body_isolation.json", "w") as f:
+            _json.dump(record, f, indent=1)
+        for w in res.warnings:
+            logger.warning(f"body isolation: {w}")
+        if not res.success:
+            raise RuntimeError(f"body-only isolation failed: {res.warnings}")
+        for name in ["L1", "L2"]:
+            out = output_dir / f"{name}_body.nii.gz"
+            nib.save(nib.Nifti1Image(bodies[name].astype(np.uint8), ref_nii.affine, ref_nii.header), out)
+            outputs[name] = out
+            logger.info(f"Saved {name}_body.nii.gz (body-only, {int(bodies[name].sum())} voxels)")
+        return outputs
+
+    logger.warning("LEGACY body isolation in use (largest component per slice; keeps posterior arch). "
+                   "Provide body_mask_path for the body-only method.")
+    for vertebra, standardized_name in pairs:
         if vertebra is None:
             continue
-
         nii = nib.load(vertebra.nifti_path)
-
-        if isolate_body_func is not None:
-            # Apply vertebral body isolation (remove posterior elements)
-            body_nii = isolate_body_func(nii)
-        else:
-            body_nii = nii
-
+        body_nii = isolate_body_func(nii) if isolate_body_func is not None else nii
         output_path = output_dir / f"{standardized_name}_body.nii.gz"
         nib.save(body_nii, output_path)
-
         outputs[standardized_name] = output_path
         logger.info(f"Saved {standardized_name}_body.nii.gz "
-                   f"(from {vertebra.original_label}, {vertebra.voxel_count} voxels)")
-
+                    f"(from {vertebra.original_label}, {vertebra.voxel_count} voxels)")
     return outputs
 
 

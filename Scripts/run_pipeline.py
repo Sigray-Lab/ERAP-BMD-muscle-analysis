@@ -3,13 +3,17 @@
 run_pipeline.py - Main orchestrator for ERAP CT analysis pipeline
 
 This script coordinates all processing steps:
-1. Segmentation (TotalSegmentator, vertebral body isolation, muscle envelope)
-2. Phantom calibration
-3. Bone analysis (trabecular BMD)
-4. Muscle analysis (SMD, IMAT)
-5. Adipose analysis (VAT, conditional SAT)
+1. Segmentation (TotalSegmentator roi_subset, vertebrae_body, tissue_4_types;
+   vertebra selection; body-only isolation; muscle envelope)
+2. Phantom calibration: loads the MANUAL calibration (manual_calibration.py must
+   have been run for the session) and builds the per-slice rod profile
+   (02_phantom_zprofile.py) used for co-located calibration
+3. Bone analysis (trabecular BMD, per-vertebra co-located calibration)
+4. Muscle analysis (SMD, IMAT, low-density fraction; co-located drift offset)
+5. Adipose analysis (VAT, conditional SAT; not reported at group level)
 6. QC visualization
-7. Results aggregation
+7. IMAT validation (tissue_4_types)
+8. Results aggregation
 
 Usage:
     python run_pipeline.py --data <raw_data_dir> --output <output_dir>
@@ -36,6 +40,7 @@ from importlib import import_module
 # Dynamic imports to handle numbered prefixes
 segmentation = import_module("01_segmentation")
 phantom_calibration = import_module("02_phantom_calibration")
+phantom_zprofile = import_module("02_phantom_zprofile")
 bone_analysis = import_module("03_bone_analysis")
 muscle_analysis = import_module("04_muscle_analysis")
 adipose_analysis = import_module("05_adipose_analysis")
@@ -139,14 +144,14 @@ def process_single_scan(subject_id: str,
         logger.error(f"Segmentation error: {e}")
         return results
 
-    # Step 2: Phantom Calibration
+    # Step 2: Phantom Calibration (manual clicks + per-slice rod profile)
     logger.section("Step 2: Phantom Calibration")
     try:
         cal_result = phantom_calibration.calibrate_phantom(ct_path, derived_dir)
         if not cal_result.success:
-            results["errors"].append("Phantom calibration failed")
-            logger.warn("Phantom calibration failed")
-            # Continue anyway - may have partial results
+            results["errors"].append("Manual phantom calibration missing (run manual_calibration.py)")
+            logger.error("Manual phantom calibration missing; bone and muscle analysis cannot run")
+            return results
         results["calibration"] = {
             "success": cal_result.success,
             "r_squared": cal_result.r_squared,
@@ -154,19 +159,33 @@ def process_single_scan(subject_id: str,
             "intercept": cal_result.intercept,
             "qc_passed": cal_result.qc_passed
         }
-        logger.metric("R²", f"{cal_result.r_squared:.4f}", indent=1)
-        logger.metric("Slope", f"{cal_result.slope:.4f}", indent=1)
-        logger.metric("Intercept", f"{cal_result.intercept:.2f}", "mg/cm³", indent=1)
+        logger.metric("Click-slice R²", f"{cal_result.r_squared:.4f}", indent=1)
+        logger.metric("Click-slice slope", f"{cal_result.slope:.4f}", indent=1)
+        # Per-slice rod profile (tracked from the clicks) -> phantom_zprofile.json + QC
+        zprofile_path = derived_dir / "phantom_zprofile.json"
+        if force or not zprofile_path.exists():
+            data_dir = ct_path.resolve().parents[3]          # RawData/bmd_ct/<sub>/<ses>/ct/<file>
+            zp = phantom_zprofile.process_session(subject_id, session, data_dir, output_base.resolve())
+            if zp is None:
+                raise RuntimeError("phantom z-profile could not be built")
+            results["phantom_tracking"] = {"max_shift_mm": zp["max_shift_mm"],
+                                           "flags": [k for k, v in zp["flags"].items() if v]}
+            if results["phantom_tracking"]["flags"]:
+                logger.warn(f"Phantom tracking flagged for review: {results['phantom_tracking']['flags']}", indent=1)
+            logger.metric("Tray shift max", f"{zp['max_shift_mm']:.2f}", "mm", indent=1)
+        else:
+            logger.log("phantom_zprofile.json exists, keeping", indent=1)
     except Exception as e:
         results["errors"].append(f"Calibration error: {e}")
         logger.error(f"Calibration error: {e}")
         return results
 
-    # Step 3: Bone Analysis
+    # Step 3: Bone Analysis (co-located per-vertebra calibration)
     logger.section("Step 3: Bone Analysis")
     try:
         vb_dir = derived_dir / "vertebral_bodies"
         bone_result = bone_analysis.analyze_bone(ct_path, vb_dir, derived_dir)
+        logger.log(f"Calibration: {bone_result.calibration_method}", indent=1)
 
         bone_output = derived_dir / "bone_results.json"
         bone_analysis.save_bone_results(bone_result, bone_output)
@@ -325,12 +344,26 @@ def process_single_scan(subject_id: str,
         results["errors"].append(f"Tissue validation error: {e}")
         logger.error(f"Tissue validation error: {e}")
 
-    # Determine overall success
-    results["success"] = (
-        results.get("bone", {}).get("success", False) or
-        results.get("muscle", {}).get("success", False) or
-        results.get("adipose", {}).get("success", False)
+    # Overall success requires the two reported modules (review F09: adipose is not reported)
+    results["success"] = bool(
+        results.get("bone", {}).get("success", False) and
+        results.get("muscle", {}).get("success", False)
     )
+
+    # Provenance manifest
+    try:
+        import subprocess
+        from importlib.metadata import version as _v
+        commit = subprocess.check_output(["git", "-C", str(SCRIPTS_DIR.parent), "rev-parse", "HEAD"], text=True).strip()
+    except Exception:
+        commit = "unknown"
+    manifest = {"subject": subject_id, "session": session, "ct": str(ct_path), "script": "run_pipeline.py",
+                "finished": datetime.now().isoformat(), "git_commit": commit,
+                "success": results["success"], "errors": results["errors"],
+                "steps": {k: results[k] for k in ["segmentation", "calibration", "phantom_tracking", "bone",
+                                                  "muscle", "adipose", "validation"] if k in results}}
+    with open(derived_dir / "analysis_manifest.json", "w") as f:
+        json.dump(manifest, f, indent=2, default=str)
 
     return results
 

@@ -107,15 +107,24 @@ def flatten_results(results: Dict[str, Any], prefix: str = "") -> Dict[str, Any]
     # Bone metrics
     if "bone" in results:
         bone = results["bone"]
-        if bone.get("L1"):
-            flat[f"{prefix}L1_vBMD_mean_mgcm3"] = bone["L1"].get("vBMD_mean_mgcm3")
-            flat[f"{prefix}L1_vBMD_median_mgcm3"] = bone["L1"].get("vBMD_median_mgcm3")
-            flat[f"{prefix}L1_trabecular_volume_cm3"] = bone["L1"].get("trabecular_volume_cm3")
-        if bone.get("L2"):
-            flat[f"{prefix}L2_vBMD_mean_mgcm3"] = bone["L2"].get("vBMD_mean_mgcm3")
-            flat[f"{prefix}L2_vBMD_median_mgcm3"] = bone["L2"].get("vBMD_median_mgcm3")
-            flat[f"{prefix}L2_trabecular_volume_cm3"] = bone["L2"].get("trabecular_volume_cm3")
+        for lvl in ["L1", "L2"]:
+            v = bone.get(lvl)
+            if not v:
+                continue
+            flat[f"{prefix}{lvl}_vBMD_mean_mgcm3"] = v.get("vBMD_mean_mgcm3")
+            flat[f"{prefix}{lvl}_vBMD_median_mgcm3"] = v.get("vBMD_median_mgcm3")
+            flat[f"{prefix}{lvl}_trabecular_volume_cm3"] = v.get("trabecular_volume_cm3")
+            flat[f"{prefix}{lvl}_body_volume_cm3"] = v.get("total_body_volume_cm3")
+            flat[f"{prefix}{lvl}_hu_mean"] = v.get("hu_mean")
+            # calibration actually used (co-located) and the click-slice sensitivity value
+            flat[f"{prefix}{lvl}_calibration_slope"] = v.get("calibration_slope")
+            flat[f"{prefix}{lvl}_calibration_r_squared"] = v.get("calibration_r_squared")
+            flat[f"{prefix}{lvl}_calibration_n_slices"] = v.get("calibration_n_slices")
+            flat[f"{prefix}{lvl}_vBMD_mean_mgcm3_z50_calibration"] = v.get("vBMD_mean_z50_calibration_mgcm3")
+            flat[f"{prefix}{lvl}_erosion_mm_used"] = v.get("erosion_mm_used")
         flat[f"{prefix}L1L2_vBMD_mean_mgcm3"] = bone.get("L1L2_vBMD_mean_mgcm3")
+        flat[f"{prefix}L1L2_vBMD_mean_mgcm3_z50_calibration"] = bone.get("L1L2_vBMD_mean_z50_calibration_mgcm3")
+        flat[f"{prefix}bone_calibration_method"] = bone.get("calibration_method")
 
     # Muscle metrics
     if "muscle" in results:
@@ -132,6 +141,9 @@ def flatten_results(results: Dict[str, Any], prefix: str = "") -> Dict[str, Any]
         flat[f"{prefix}muscle_CSA_mean_cm2"] = muscle.get("muscle_CSA_mean_cm2")
         flat[f"{prefix}muscle_CSA_max_cm2"] = muscle.get("muscle_CSA_max_cm2")
         flat[f"{prefix}muscle_LR_symmetry_index"] = muscle.get("muscle_LR_symmetry_index")
+        flat[f"{prefix}muscle_drift_correction_hu"] = muscle.get("drift_correction_hu")
+        flat[f"{prefix}muscle_drift_correction_hu_z50"] = muscle.get("drift_correction_hu_z50")
+        flat[f"{prefix}muscle_n_slices"] = muscle.get("n_slices")
 
     # Adipose metrics
     if "adipose" in results:
@@ -245,12 +257,12 @@ def aggregate_results(derived_data_dir: Path,
         row = {"subject_id": subject_id}
 
         # Load baseline results
+        # has_* means "bone AND muscle measurements succeeded", not "directory exists" (review L08)
         baseline_dir = subject_dir / "ses-Baseline"
         if baseline_dir.exists():
             baseline = load_session_results(baseline_dir)
-            baseline_flat = flatten_results(baseline, prefix="pre_")
-            row.update(baseline_flat)
-            row["has_baseline"] = True
+            row.update(flatten_results(baseline, prefix="pre_"))
+            row["has_baseline"] = bool(baseline.get("bone_success") and baseline.get("muscle_success"))
         else:
             row["has_baseline"] = False
 
@@ -258,9 +270,8 @@ def aggregate_results(derived_data_dir: Path,
         followup_dir = subject_dir / "ses-Followup"
         if followup_dir.exists():
             followup = load_session_results(followup_dir)
-            followup_flat = flatten_results(followup, prefix="post_")
-            row.update(followup_flat)
-            row["has_followup"] = True
+            row.update(flatten_results(followup, prefix="post_"))
+            row["has_followup"] = bool(followup.get("bone_success") and followup.get("muscle_success"))
         else:
             row["has_followup"] = False
 
@@ -301,9 +312,23 @@ def aggregate_results(derived_data_dir: Path,
 
     df = df[final_order]
 
-    # Save CSV
+    # Save CSV + provenance manifest
     df.to_csv(output_path, index=False)
     logger.info(f"Results saved to {output_path}")
+    try:
+        import subprocess
+        from datetime import datetime
+        commit = subprocess.check_output(["git", "-C", str(Path(__file__).resolve().parent.parent),
+                                          "rev-parse", "HEAD"], text=True).strip()
+    except Exception:
+        commit = "unknown"
+    manifest = {"timestamp": datetime.now().isoformat(), "git_commit": commit,
+                "n_subjects": int(len(df)),
+                "n_complete_pairs": int((df["has_baseline"] & df["has_followup"]).sum()),
+                "bone_calibration_methods": sorted(set(str(v) for v in df.get("pre_bone_calibration_method", pd.Series(dtype=str)).dropna())),
+                "source": str(derived_data_dir)}
+    with open(Path(output_path).with_name("results_manifest.json"), "w") as f:
+        json.dump(manifest, f, indent=2)
     logger.info(f"Total subjects: {len(df)}")
     logger.info(f"Subjects with baseline: {df['has_baseline'].sum()}")
     logger.info(f"Subjects with followup: {df['has_followup'].sum()}")

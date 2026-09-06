@@ -8,6 +8,7 @@ This module handles:
 3. Creating muscle compartment envelopes from erector spinae masks
 """
 
+import json
 import subprocess
 import logging
 from pathlib import Path
@@ -34,19 +35,26 @@ def check_totalsegmentator_output_exists(output_dir: Path, task: str = "roi_subs
         True if required outputs exist, False otherwise
     """
     if task == "roi_subset":
-        # Check for at least 2 vertebrae and muscle masks
-        vertebrae_found = 0
-        for label in ["vertebrae_T10", "vertebrae_T11", "vertebrae_T12",
-                      "vertebrae_L1", "vertebrae_L2", "vertebrae_L3", "vertebrae_L4"]:
-            if (output_dir / f"{label}.nii.gz").exists():
-                vertebrae_found += 1
+        # Both muscle sides and at least two non-empty vertebra masks (review L02:
+        # an empty or half-written directory must not count as complete).
+        def _nonempty(p: Path) -> bool:
+            try:
+                return p.exists() and bool(np.asarray(nib.load(p).dataobj).any())
+            except Exception:
+                return False
+        vertebrae_found = sum(_nonempty(output_dir / f"{lab}.nii.gz") for lab in
+                              ["vertebrae_T10", "vertebrae_T11", "vertebrae_T12",
+                               "vertebrae_L1", "vertebrae_L2", "vertebrae_L3", "vertebrae_L4"])
+        muscle_ok = ((_nonempty(output_dir / "autochthon_left.nii.gz") and _nonempty(output_dir / "autochthon_right.nii.gz")) or
+                     (_nonempty(output_dir / "erector_spinae_left.nii.gz") and _nonempty(output_dir / "erector_spinae_right.nii.gz")))
+        return vertebrae_found >= 2 and muscle_ok
 
-        muscle_exists = (
-            (output_dir / "autochthon_left.nii.gz").exists() or
-            (output_dir / "erector_spinae_left.nii.gz").exists()
-        )
-
-        return vertebrae_found >= 2 and muscle_exists
+    elif task == "vertebrae_body":
+        m = output_dir / "vertebrae_body" / "manifest.json"
+        try:
+            return (output_dir / "vertebrae_body" / "vertebrae_body.nii.gz").exists() and json.load(open(m)).get("exit_code") == 0
+        except Exception:
+            return False
 
     elif task == "total":
         # Check for adipose masks (legacy task)
@@ -160,6 +168,14 @@ def run_totalsegmentator(ct_path: Path, output_dir: Path, task: str = "roi_subse
             logger.error(f"Full resolution error: {e}")
             return False
 
+    elif task == "vertebrae_body":
+        # Body-only vertebral segmentation (review F01). Runs through the wrapper that
+        # keeps temp paths short (macOS socket limit) and writes a manifest.
+        from importlib import import_module
+        seg_bodies = import_module("01b_segment_vertebral_bodies")
+        root = output_dir.resolve().parents[2]
+        return seg_bodies.segment_vertebral_bodies(ct_path, output_dir / "vertebrae_body", root, force=force) == 0
+
     elif task == "total":
         # Full segmentation for adipose tissue (legacy - prefer tissue_4_types)
         cmd = [
@@ -224,14 +240,15 @@ def run_totalsegmentator(ct_path: Path, output_dir: Path, task: str = "roi_subse
 def isolate_vertebral_body(vertebra_nii: nib.Nifti1Image,
                            endplate_exclude_percent: float = 10.0) -> nib.Nifti1Image:
     """
-    Isolate vertebral body (centrum) from full vertebra mask.
-
-    TotalSegmentator includes posterior elements (pedicles, laminae, spinous process)
-    which bias trabecular BMD measurements. This function isolates just the body.
+    LEGACY (not used since 2026-09). Keeps the largest connected component per
+    axial slice of the whole-vertebra label, which in pedicle slices is the whole
+    vertebra including the posterior arch (adversarial review finding F01). The
+    pipeline now uses utils/body_isolation.py on the TotalSegmentator
+    `vertebrae_body` mask. Retained only to reproduce the pre-review results.
 
     Approach:
-    1. Per axial slice: keep only the anterior (largest) connected component
-    2. Exclude endplates (top/bottom portion of vertebral height)
+    1. Per axial slice: keep the largest connected component
+    2. Exclude endplates (10 % of the whole-vertebra z-extent, top and bottom)
 
     Args:
         vertebra_nii: NIfTI image of full vertebra mask
@@ -319,15 +336,18 @@ def create_muscle_envelope(erector_left_nii: nib.Nifti1Image,
     """
     Create fascial envelope for muscle compartment analysis.
 
-    TotalSegmentator segments muscle tissue, excluding fat voxels. This creates
-    a "Swiss cheese" effect where IMAT (intermuscular adipose) appears as holes.
-    To measure IMAT, we need to create a fascial envelope that includes the fat.
+    The TotalSegmentator autochthon masks follow muscle tissue and can exclude
+    fat at the fascial boundary and inside the compartment (0.3-10 % of the mask
+    voxels are HU-fat). A closed envelope is built so that IMAT inside the
+    compartment is measured.
 
     Approach:
-    1. Combine left + right erector spinae masks
-    2. Morphological closing to fill gaps
+    1. Combine left + right erector spinae (autochthon) masks
+    2. Morphological closing with a 7-voxel ball (closing_radius_mm / voxel size,
+       truncated to an integer: 7 voxels = 4.8 mm in-plane, 4.4 mm axial at
+       0.684 x 0.684 x 0.625 mm)
     3. 2D hole filling per slice
-    4. Restrict to L1-L2 z-range
+    4. Restrict to the z-range of the two target vertebral bodies
 
     Args:
         erector_left_nii: Left erector spinae mask
@@ -464,6 +484,11 @@ def process_segmentation(ct_path: Path, derived_dir: Path, force: bool = False) 
 
     results["segmentations_dir"] = seg_dir
 
+    # Body-only vertebral bodies (required for trabecular isolation)
+    if not run_totalsegmentator(ct_path, seg_dir, task="vertebrae_body", force=force):
+        results["errors"].append("TotalSegmentator task=vertebrae_body failed")
+        return results
+
     # Run tissue_4_types for VAT/SAT/muscle/IMAT segmentation
     # This replaces the old task=total and provides learned tissue masks
     if not run_totalsegmentator(ct_path, seg_dir, task="tissue_4_types", force=force):
@@ -500,7 +525,7 @@ def process_segmentation(ct_path: Path, derived_dir: Path, force: bool = False) 
         # Create standardized L1/L2 body files with vertebral body isolation
         vertebra_paths = standardize_vertebrae(
             detection_result, vb_dir,
-            isolate_body_func=isolate_vertebral_body
+            body_mask_path=seg_dir / "vertebrae_body" / "vertebrae_body.nii.gz"
         )
 
         results["vertebral_bodies_dir"] = vb_dir

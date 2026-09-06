@@ -3,11 +3,25 @@
 muscle_analysis.py - Skeletal muscle composition analysis
 
 This module handles:
-1. Classifying voxels within muscle compartment envelope by HU
+1. Classifying voxels within the muscle compartment envelope by HU
 2. Computing SMD (skeletal muscle density)
 3. Measuring IMAT (intermuscular adipose tissue)
 4. Calculating myosteatosis metrics
 5. Computing cross-sectional areas
+
+Changes 2026-09 (adversarial review):
+- HU classes are continuous half-open intervals (review F03). The drift offset is
+  fractional, so the old closed integer intervals (-29..29, 30..150) left voxels
+  in (29, 30) and (-30, -29) unclassified.
+      IMAT            -190 <= HU < -30
+      low-density      -30 <= HU <  30
+      normal            30 <= HU <= 150
+      muscle (all)     -30 <= HU <= 150
+- Drift offset is the phantom base-material mean over the slices of the muscle
+  slab (co-located, from phantom_zprofile.json) instead of the 9 click slices
+  (review F02). The click-slice value is kept in the output for reference.
+- The L/R symmetry index is computed inside the envelope (review F08).
+- JSON output never contains NaN (review L06).
 """
 
 import json
@@ -19,16 +33,29 @@ from typing import Optional, Tuple, Dict
 import numpy as np
 import nibabel as nib
 
+from utils.calibration import load_zprofile, base_offset_for_slices
+
 logger = logging.getLogger(__name__)
 
 
-# HU thresholds for tissue classification (standard literature values)
-# Note: These are applied after drift correction
+# HU class boundaries (applied after drift correction). Half-open at the
+# internal boundaries so that every HU value in [-190, 150] belongs to exactly
+# one class; see module docstring.
+HU_IMAT_LOW = -190.0
+HU_IMAT_HIGH = -30.0      # exclusive
+HU_LOW_HIGH = 30.0        # exclusive
+HU_MUSCLE_HIGH = 150.0    # inclusive
+
+CLASSIFICATION_CONVENTION = ("IMAT [-190,-30) HU; low-density muscle [-30,30) HU; "
+                             "normal muscle [30,150] HU; muscle_all [-30,150] HU; "
+                             "after adding the drift offset")
+
+# Kept for documentation / backward-compatible imports
 THRESHOLDS = {
-    "imat": (-190, -30),           # Intermuscular adipose tissue
-    "muscle_low": (-29, 29),       # Low density (myosteatotic) muscle
-    "muscle_normal": (30, 150),    # Normal density muscle
-    "muscle_all": (-29, 150),      # All muscle tissue
+    "imat": (HU_IMAT_LOW, HU_IMAT_HIGH),
+    "muscle_low": (HU_IMAT_HIGH, HU_LOW_HIGH),
+    "muscle_normal": (HU_LOW_HIGH, HU_MUSCLE_HIGH),
+    "muscle_all": (HU_IMAT_HIGH, HU_MUSCLE_HIGH),
 }
 
 
@@ -59,12 +86,19 @@ class MuscleAnalysisResult:
     muscle_CSA_mean_cm2: float
     muscle_CSA_max_cm2: float
 
-    # Symmetry QC
+    # Symmetry QC (within envelope)
     muscle_LR_symmetry_index: float
 
-    # Additional info
+    # Drift correction actually used, and the click-slice value for reference
     drift_correction_hu: float
+    drift_correction_method: str
+    drift_correction_hu_z50: float
+    drift_slices: Optional[list]
+
     n_slices: int
+    envelope_z_min: Optional[int]
+    envelope_z_max: Optional[int]
+    classification_convention: str
     qc_messages: list
 
 
@@ -72,87 +106,74 @@ def classify_voxels(ct_data: np.ndarray,
                     envelope_mask: np.ndarray,
                     drift_offset: float = 0.0) -> Dict[str, np.ndarray]:
     """
-    Classify voxels within muscle compartment by tissue type.
+    Classify voxels within the muscle compartment by tissue type using the
+    continuous half-open convention in the module docstring.
 
     Args:
-        ct_data: CT volume
+        ct_data: CT volume (raw HU)
         envelope_mask: Muscle compartment envelope mask
-        drift_offset: HU drift correction (ADDED to data)
-                     This is the value from calibration_hu_stability.json offset_hu,
-                     which represents what to ADD to correct scanner drift.
-
-    Returns:
-        Dictionary of tissue masks
+        drift_offset: HU ADDED to the data before classification
     """
-    # Apply drift correction (add offset to correct scanner drift)
-    # offset_hu is computed as -drift_hu, i.e., if base reads -10 HU,
-    # offset_hu = +10, and we ADD it to bring measurements back to nominal
     corrected = ct_data + drift_offset
-
-    # Initialize output masks
-    masks = {}
-
-    # Get envelope voxels
-    in_envelope = envelope_mask.astype(bool)
-
-    # Classify by HU thresholds
-    for tissue, (low, high) in THRESHOLDS.items():
-        mask = in_envelope & (corrected >= low) & (corrected <= high)
-        masks[tissue] = mask
-
-    return masks
+    inside = envelope_mask.astype(bool)
+    imat = inside & (corrected >= HU_IMAT_LOW) & (corrected < HU_IMAT_HIGH)
+    low = inside & (corrected >= HU_IMAT_HIGH) & (corrected < HU_LOW_HIGH)
+    normal = inside & (corrected >= HU_LOW_HIGH) & (corrected <= HU_MUSCLE_HIGH)
+    return {"imat": imat, "muscle_low": low, "muscle_normal": normal, "muscle_all": low | normal}
 
 
 def compute_symmetry_index(left_mask: np.ndarray,
                            right_mask: np.ndarray,
                            envelope_mask: np.ndarray) -> float:
-    """
-    Compute left-right symmetry index for QC.
-
-    Args:
-        left_mask: Left erector spinae mask
-        right_mask: Right erector spinae mask
-        envelope_mask: Combined envelope mask
-
-    Returns:
-        Symmetry index (ratio of smaller/larger side volume)
-    """
-    left_vol = left_mask.sum()
-    right_vol = right_mask.sum()
-
+    """Ratio of smaller to larger side volume, restricted to the envelope (1.0 = symmetric)."""
+    env = envelope_mask.astype(bool)
+    left_vol = np.count_nonzero(left_mask & env)
+    right_vol = np.count_nonzero(right_mask & env)
     if left_vol == 0 or right_vol == 0:
         return 0.0
-
-    # Ratio of smaller to larger (1.0 = perfect symmetry)
     return min(left_vol, right_vol) / max(left_vol, right_vol)
 
 
 def compute_csa(mask: np.ndarray, voxel_sizes: Tuple[float, float, float]) -> Tuple[float, float]:
-    """
-    Compute cross-sectional area statistics.
-
-    Args:
-        mask: 3D binary mask
-        voxel_sizes: Voxel dimensions (x, y, z) in mm
-
-    Returns:
-        Tuple of (mean_CSA_cm2, max_CSA_cm2)
-    """
-    voxel_area_mm2 = voxel_sizes[0] * voxel_sizes[1]
-    voxel_area_cm2 = voxel_area_mm2 / 100.0
-
-    # Calculate area for each slice
-    slice_areas = []
-    for z in range(mask.shape[2]):
-        slice_mask = mask[:, :, z]
-        if slice_mask.any():
-            area = slice_mask.sum() * voxel_area_cm2
-            slice_areas.append(area)
-
-    if not slice_areas:
+    """Mean and max cross-sectional area (cm²) over slices that contain the mask."""
+    voxel_area_cm2 = voxel_sizes[0] * voxel_sizes[1] / 100.0
+    per_slice = mask.sum(axis=(0, 1))
+    per_slice = per_slice[per_slice > 0] * voxel_area_cm2
+    if per_slice.size == 0:
         return 0.0, 0.0
+    return float(np.mean(per_slice)), float(np.max(per_slice))
 
-    return np.mean(slice_areas), np.max(slice_areas)
+
+def resolve_drift_offset(calibration_dir: Path, envelope_mask: Optional[np.ndarray]) -> dict:
+    """
+    Decide the drift offset for a session.
+
+    Returns dict with offset_hu (used), method, offset_hu_z50, slices.
+    Co-located (phantom base over the envelope slices) when phantom_zprofile.json
+    exists and the envelope is non-empty; otherwise the click-slice value from
+    calibration_hu_stability.json.
+    """
+    z50 = None
+    stability_path = Path(calibration_dir) / "calibration_hu_stability.json"
+    if stability_path.exists():
+        with open(stability_path) as f:
+            z50 = float(json.load(f).get("drift_correction", {}).get("offset_hu", 0.0))
+
+    zprofile = load_zprofile(calibration_dir)
+    if zprofile is not None and envelope_mask is not None and envelope_mask.any():
+        zs = np.where(envelope_mask.any(axis=(0, 1)))[0]
+        try:
+            info = base_offset_for_slices(zprofile, zs)
+            return {"offset_hu": info["offset_hu"], "method": info["method"],
+                    "offset_hu_z50": z50 if z50 is not None else np.nan,
+                    "slices": [info["z_min"], info["z_max"]], "n_slices": info["n_slices"]}
+        except ValueError as e:
+            logger.warning(f"co-located drift offset unavailable ({e}); using click-slice value")
+    if z50 is None:
+        return {"offset_hu": 0.0, "method": "none (no calibration available)", "offset_hu_z50": np.nan,
+                "slices": None, "n_slices": 0}
+    return {"offset_hu": z50, "method": "click slice (calibration_hu_stability.json)",
+            "offset_hu_z50": z50, "slices": None, "n_slices": 9}
 
 
 def analyze_muscle(ct_path: Path,
@@ -166,141 +187,85 @@ def analyze_muscle(ct_path: Path,
         ct_path: Path to CT NIfTI file
         envelope_path: Path to muscle compartment envelope
         segmentations_dir: Directory with erector spinae masks (for symmetry)
-        calibration_dir: Directory containing calibration_hu_stability.json
-
-    Returns:
-        MuscleAnalysisResult with all metrics
+        calibration_dir: Directory containing calibration_hu_stability.json / phantom_zprofile.json
     """
     qc_messages = []
-
-    # Load drift correction
-    drift_offset = 0.0
-    stability_path = calibration_dir / "calibration_hu_stability.json"
-    if stability_path.exists():
-        with open(stability_path) as f:
-            stability = json.load(f)
-        drift_offset = stability.get("drift_correction", {}).get("offset_hu", 0.0)
-        logger.info(f"Drift correction: {drift_offset:.1f} HU")
-    else:
-        qc_messages.append("WARNING: No drift correction available")
-
-    # Load CT and envelope
     ct_nii = nib.load(ct_path)
-    ct_data = ct_nii.get_fdata()
+    ct_data = np.asarray(ct_nii.dataobj, dtype=np.float32)
     voxel_sizes = ct_nii.header.get_zooms()[:3]
+    envelope_mask = np.asarray(nib.load(envelope_path).dataobj) > 0
 
-    envelope_nii = nib.load(envelope_path)
-    envelope_mask = envelope_nii.get_fdata().astype(bool)
+    drift = resolve_drift_offset(calibration_dir, envelope_mask)
+    drift_offset = float(drift["offset_hu"])
+    logger.info(f"Drift correction: {drift_offset:+.2f} HU [{drift['method']}] "
+                f"(click-slice value {drift['offset_hu_z50']:+.2f} HU)")
+    if drift["method"].startswith("none"):
+        qc_messages.append("WARNING: No drift correction available")
 
     if not envelope_mask.any():
         logger.error("Empty muscle envelope")
         return MuscleAnalysisResult(
-            success=False,
-            compartment_volume_cm3=0.0,
-            muscle_tissue_volume_cm3=0.0,
-            muscle_normal_volume_cm3=0.0,
-            muscle_low_density_volume_cm3=0.0,
-            imat_volume_cm3=0.0,
-            muscle_low_density_percent=0.0,
-            imat_percent=0.0,
-            muscle_SMD_mean_hu=np.nan,
-            muscle_SMD_median_hu=np.nan,
-            muscle_SMD_std_hu=np.nan,
-            muscle_SMD_P10_hu=np.nan,
-            muscle_SMD_P90_hu=np.nan,
-            muscle_CSA_mean_cm2=0.0,
-            muscle_CSA_max_cm2=0.0,
-            muscle_LR_symmetry_index=0.0,
-            drift_correction_hu=drift_offset,
-            n_slices=0,
-            qc_messages=["ERROR: Empty muscle envelope"]
-        )
+            success=False, compartment_volume_cm3=0.0, muscle_tissue_volume_cm3=0.0,
+            muscle_normal_volume_cm3=0.0, muscle_low_density_volume_cm3=0.0, imat_volume_cm3=0.0,
+            muscle_low_density_percent=0.0, imat_percent=0.0,
+            muscle_SMD_mean_hu=np.nan, muscle_SMD_median_hu=np.nan, muscle_SMD_std_hu=np.nan,
+            muscle_SMD_P10_hu=np.nan, muscle_SMD_P90_hu=np.nan,
+            muscle_CSA_mean_cm2=0.0, muscle_CSA_max_cm2=0.0, muscle_LR_symmetry_index=0.0,
+            drift_correction_hu=drift_offset, drift_correction_method=drift["method"],
+            drift_correction_hu_z50=drift["offset_hu_z50"], drift_slices=drift["slices"],
+            n_slices=0, envelope_z_min=None, envelope_z_max=None,
+            classification_convention=CLASSIFICATION_CONVENTION,
+            qc_messages=["ERROR: Empty muscle envelope"])
 
-    # Calculate voxel volume
-    voxel_vol_mm3 = np.prod(voxel_sizes)
-    voxel_vol_cm3 = voxel_vol_mm3 / 1000.0
+    voxel_vol_cm3 = float(np.prod(voxel_sizes)) / 1000.0
+    compartment_volume_cm3 = int(envelope_mask.sum()) * voxel_vol_cm3
+    env_z = np.where(envelope_mask.any(axis=(0, 1)))[0]
 
-    # Compartment volume
-    compartment_voxels = envelope_mask.sum()
-    compartment_volume_cm3 = compartment_voxels * voxel_vol_cm3
-
-    # Classify voxels
     tissue_masks = classify_voxels(ct_data, envelope_mask, drift_offset)
+    muscle_all_vol = int(tissue_masks["muscle_all"].sum()) * voxel_vol_cm3
+    muscle_normal_vol = int(tissue_masks["muscle_normal"].sum()) * voxel_vol_cm3
+    muscle_low_vol = int(tissue_masks["muscle_low"].sum()) * voxel_vol_cm3
+    imat_vol = int(tissue_masks["imat"].sum()) * voxel_vol_cm3
 
-    # Calculate volumes
-    muscle_all_vol = tissue_masks["muscle_all"].sum() * voxel_vol_cm3
-    muscle_normal_vol = tissue_masks["muscle_normal"].sum() * voxel_vol_cm3
-    muscle_low_vol = tissue_masks["muscle_low"].sum() * voxel_vol_cm3
-    imat_vol = tissue_masks["imat"].sum() * voxel_vol_cm3
+    muscle_low_pct = (muscle_low_vol / muscle_all_vol * 100) if muscle_all_vol > 0 else 0.0
+    imat_pct = (imat_vol / compartment_volume_cm3 * 100) if compartment_volume_cm3 > 0 else 0.0
 
-    # Calculate percentages
-    muscle_low_pct = 0.0
-    if muscle_all_vol > 0:
-        muscle_low_pct = (muscle_low_vol / muscle_all_vol) * 100
-
-    imat_pct = 0.0
-    if compartment_volume_cm3 > 0:
-        imat_pct = (imat_vol / compartment_volume_cm3) * 100
-
-    # Extract muscle HU values for SMD calculation
-    corrected_ct = ct_data + drift_offset
-    muscle_hu = corrected_ct[tissue_masks["muscle_all"]]
-
-    if len(muscle_hu) > 0:
-        smd_mean = float(np.mean(muscle_hu))
-        smd_median = float(np.median(muscle_hu))
-        smd_std = float(np.std(muscle_hu))
-        smd_p10 = float(np.percentile(muscle_hu, 10))
-        smd_p90 = float(np.percentile(muscle_hu, 90))
+    muscle_hu = (ct_data + drift_offset)[tissue_masks["muscle_all"]]
+    if muscle_hu.size > 0:
+        smd_mean, smd_median, smd_std = float(np.mean(muscle_hu)), float(np.median(muscle_hu)), float(np.std(muscle_hu))
+        smd_p10, smd_p90 = float(np.percentile(muscle_hu, 10)), float(np.percentile(muscle_hu, 90))
     else:
         smd_mean = smd_median = smd_std = smd_p10 = smd_p90 = np.nan
         qc_messages.append("WARNING: No muscle voxels found")
 
-    # Cross-sectional area
     csa_mean, csa_max = compute_csa(tissue_masks["muscle_all"], voxel_sizes)
+    n_slices = int(np.count_nonzero(tissue_masks["muscle_all"].any(axis=(0, 1))))
 
-    # Count slices
-    z_with_muscle = np.where(tissue_masks["muscle_all"].any(axis=(0, 1)))[0]
-    n_slices = len(z_with_muscle)
-
-    # Symmetry index - try multiple naming conventions
+    # Symmetry inside the envelope
     symmetry_index = 0.0
-    muscle_names = [
-        ("erector_spinae_left.nii.gz", "erector_spinae_right.nii.gz"),
-        ("autochthon_left.nii.gz", "autochthon_right.nii.gz"),
-    ]
-
-    left_path = None
-    right_path = None
-    for left_name, right_name in muscle_names:
-        l_path = segmentations_dir / left_name
-        r_path = segmentations_dir / right_name
+    pair = None
+    for left_name, right_name in [("erector_spinae_left.nii.gz", "erector_spinae_right.nii.gz"),
+                                  ("autochthon_left.nii.gz", "autochthon_right.nii.gz")]:
+        l_path, r_path = Path(segmentations_dir) / left_name, Path(segmentations_dir) / right_name
         if l_path.exists() and r_path.exists():
-            left_path = l_path
-            right_path = r_path
+            pair = (l_path, r_path)
             break
-
-    if left_path is not None and right_path is not None:
-        left_mask = nib.load(left_path).get_fdata().astype(bool)
-        right_mask = nib.load(right_path).get_fdata().astype(bool)
+    if pair:
+        left_mask = np.asarray(nib.load(pair[0]).dataobj) > 0
+        right_mask = np.asarray(nib.load(pair[1]).dataobj) > 0
         symmetry_index = compute_symmetry_index(left_mask, right_mask, envelope_mask)
-
         if symmetry_index < 0.7:
             qc_messages.append(f"WARNING: Low L/R symmetry = {symmetry_index:.2f}")
-        elif symmetry_index > 1.3:
-            qc_messages.append(f"WARNING: High L/R symmetry = {symmetry_index:.2f}")
     else:
         qc_messages.append("WARNING: Could not compute symmetry (missing L/R masks)")
 
-    # Additional QC checks
     if imat_pct == 0:
         qc_messages.append("WARNING: IMAT = 0% (may indicate envelope problem)")
-
     if muscle_low_pct > 50:
         qc_messages.append(f"WARNING: High myosteatosis = {muscle_low_pct:.1f}%")
 
     logger.info(f"Muscle analysis: SMD={smd_mean:.1f} HU, low density={muscle_low_pct:.1f}%, "
-                f"IMAT={imat_pct:.1f}%, volume={muscle_all_vol:.1f} cm³")
+                f"IMAT={imat_pct:.1f}%, volume={muscle_all_vol:.1f} cm³, CSA={csa_mean:.1f} cm²")
 
     return MuscleAnalysisResult(
         success=True,
@@ -311,72 +276,58 @@ def analyze_muscle(ct_path: Path,
         imat_volume_cm3=imat_vol,
         muscle_low_density_percent=muscle_low_pct,
         imat_percent=imat_pct,
-        muscle_SMD_mean_hu=smd_mean,
-        muscle_SMD_median_hu=smd_median,
-        muscle_SMD_std_hu=smd_std,
-        muscle_SMD_P10_hu=smd_p10,
-        muscle_SMD_P90_hu=smd_p90,
-        muscle_CSA_mean_cm2=csa_mean,
-        muscle_CSA_max_cm2=csa_max,
+        muscle_SMD_mean_hu=smd_mean, muscle_SMD_median_hu=smd_median, muscle_SMD_std_hu=smd_std,
+        muscle_SMD_P10_hu=smd_p10, muscle_SMD_P90_hu=smd_p90,
+        muscle_CSA_mean_cm2=csa_mean, muscle_CSA_max_cm2=csa_max,
         muscle_LR_symmetry_index=symmetry_index,
         drift_correction_hu=drift_offset,
+        drift_correction_method=drift["method"],
+        drift_correction_hu_z50=drift["offset_hu_z50"],
+        drift_slices=drift["slices"],
         n_slices=n_slices,
-        qc_messages=qc_messages
-    )
+        envelope_z_min=int(env_z.min()), envelope_z_max=int(env_z.max()),
+        classification_convention=CLASSIFICATION_CONVENTION,
+        qc_messages=qc_messages)
+
+
+def _json_safe(obj):
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, (np.floating, float)):
+        return float(obj) if np.isfinite(obj) else None
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    return obj
 
 
 def save_muscle_results(result: MuscleAnalysisResult, output_path: Path):
-    """Save muscle analysis results to JSON."""
     with open(output_path, "w") as f:
-        json.dump(asdict(result), f, indent=2)
-
+        json.dump(_json_safe(asdict(result)), f, indent=2, allow_nan=False)
     logger.info(f"Muscle results saved to {output_path}")
+
+
+def _load_for_masks(ct_path: Path, envelope_path: Path, calibration_dir: Path):
+    ct_nii = nib.load(ct_path)
+    ct_data = np.asarray(ct_nii.dataobj, dtype=np.float32)
+    envelope_mask = np.asarray(nib.load(envelope_path).dataobj) > 0
+    drift = resolve_drift_offset(calibration_dir, envelope_mask)
+    return ct_nii, ct_data, envelope_mask, float(drift["offset_hu"])
 
 
 def get_tissue_classification_mask(ct_path: Path,
                                    envelope_path: Path,
                                    calibration_dir: Path) -> nib.Nifti1Image:
-    """
-    Generate labeled mask for QC visualization.
-
-    Labels:
-    - 0: Outside envelope
-    - 1: IMAT
-    - 2: Low density muscle
-    - 3: Normal density muscle
-
-    Args:
-        ct_path: Path to CT NIfTI
-        envelope_path: Path to envelope mask
-        calibration_dir: Directory with calibration
-
-    Returns:
-        NIfTI image with tissue labels
-    """
-    # Load drift correction
-    drift_offset = 0.0
-    stability_path = calibration_dir / "calibration_hu_stability.json"
-    if stability_path.exists():
-        with open(stability_path) as f:
-            stability = json.load(f)
-        drift_offset = stability.get("drift_correction", {}).get("offset_hu", 0.0)
-
-    # Load data
-    ct_nii = nib.load(ct_path)
-    ct_data = ct_nii.get_fdata()
-
-    envelope_nii = nib.load(envelope_path)
-    envelope_mask = envelope_nii.get_fdata().astype(bool)
-
-    # Classify
+    """Labelled mask for QC: 1 = IMAT, 2 = low-density muscle, 3 = normal muscle."""
+    ct_nii, ct_data, envelope_mask, drift_offset = _load_for_masks(ct_path, envelope_path, calibration_dir)
     tissue_masks = classify_voxels(ct_data, envelope_mask, drift_offset)
-
-    # Create labeled output
     labels = np.zeros(ct_data.shape, dtype=np.uint8)
     labels[tissue_masks["imat"]] = 1
     labels[tissue_masks["muscle_low"]] = 2
     labels[tissue_masks["muscle_normal"]] = 3
-
     return nib.Nifti1Image(labels, ct_nii.affine, ct_nii.header)
 
 
@@ -385,116 +336,47 @@ def save_tissue_masks(ct_path: Path,
                       calibration_dir: Path,
                       output_dir: Path) -> Dict[str, Path]:
     """
-    Save individual tissue classification masks as NIfTI files.
-
-    Creates:
-    - muscle_envelope.nii.gz: Full muscle compartment envelope
-    - muscle_imat.nii.gz: IMAT mask (-190 to -30 HU)
-    - muscle_low_density.nii.gz: Low density muscle mask (-29 to +29 HU)
-    - muscle_normal.nii.gz: Normal density muscle mask (+30 to +150 HU)
-    - muscle_all.nii.gz: All muscle tissue mask (-29 to +150 HU)
-    - muscle_classification.nii.gz: Combined labeled mask (1=IMAT, 2=low, 3=normal)
-
-    Args:
-        ct_path: Path to CT NIfTI file
-        envelope_path: Path to muscle compartment envelope
-        calibration_dir: Directory containing calibration_hu_stability.json
-        output_dir: Directory to save masks
-
-    Returns:
-        Dictionary mapping mask names to saved paths
+    Save individual tissue classification masks as NIfTI files:
+    muscle_envelope, muscle_imat, muscle_low_density, muscle_normal, muscle_all,
+    muscle_classification (1=IMAT, 2=low, 3=normal).
     """
+    output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Load drift correction
-    drift_offset = 0.0
-    stability_path = calibration_dir / "calibration_hu_stability.json"
-    if stability_path.exists():
-        with open(stability_path) as f:
-            stability = json.load(f)
-        drift_offset = stability.get("drift_correction", {}).get("offset_hu", 0.0)
-
-    # Load data
-    ct_nii = nib.load(ct_path)
-    ct_data = ct_nii.get_fdata()
-
-    envelope_nii = nib.load(envelope_path)
-    envelope_mask = envelope_nii.get_fdata().astype(bool)
-
-    # Classify voxels
+    ct_nii, ct_data, envelope_mask, drift_offset = _load_for_masks(ct_path, envelope_path, calibration_dir)
     tissue_masks = classify_voxels(ct_data, envelope_mask, drift_offset)
 
-    saved_paths = {}
+    def save(mask, name):
+        p = output_dir / name
+        nib.save(nib.Nifti1Image(mask.astype(np.uint8), ct_nii.affine, ct_nii.header), p)
+        return p
 
-    # Save envelope
-    envelope_out = output_dir / "muscle_envelope.nii.gz"
-    nib.save(nib.Nifti1Image(envelope_mask.astype(np.uint8), ct_nii.affine, ct_nii.header),
-             envelope_out)
-    saved_paths["envelope"] = envelope_out
-
-    # Save IMAT mask
-    imat_out = output_dir / "muscle_imat.nii.gz"
-    nib.save(nib.Nifti1Image(tissue_masks["imat"].astype(np.uint8), ct_nii.affine, ct_nii.header),
-             imat_out)
-    saved_paths["imat"] = imat_out
-
-    # Save low density muscle mask
-    low_out = output_dir / "muscle_low_density.nii.gz"
-    nib.save(nib.Nifti1Image(tissue_masks["muscle_low"].astype(np.uint8), ct_nii.affine, ct_nii.header),
-             low_out)
-    saved_paths["muscle_low"] = low_out
-
-    # Save normal density muscle mask
-    normal_out = output_dir / "muscle_normal.nii.gz"
-    nib.save(nib.Nifti1Image(tissue_masks["muscle_normal"].astype(np.uint8), ct_nii.affine, ct_nii.header),
-             normal_out)
-    saved_paths["muscle_normal"] = normal_out
-
-    # Save all muscle tissue mask
-    all_out = output_dir / "muscle_all.nii.gz"
-    nib.save(nib.Nifti1Image(tissue_masks["muscle_all"].astype(np.uint8), ct_nii.affine, ct_nii.header),
-             all_out)
-    saved_paths["muscle_all"] = all_out
-
-    # Save combined classification mask
+    saved = {
+        "envelope": save(envelope_mask, "muscle_envelope.nii.gz"),
+        "imat": save(tissue_masks["imat"], "muscle_imat.nii.gz"),
+        "muscle_low": save(tissue_masks["muscle_low"], "muscle_low_density.nii.gz"),
+        "muscle_normal": save(tissue_masks["muscle_normal"], "muscle_normal.nii.gz"),
+        "muscle_all": save(tissue_masks["muscle_all"], "muscle_all.nii.gz"),
+    }
     labels = np.zeros(ct_data.shape, dtype=np.uint8)
     labels[tissue_masks["imat"]] = 1
     labels[tissue_masks["muscle_low"]] = 2
     labels[tissue_masks["muscle_normal"]] = 3
-
-    classification_out = output_dir / "muscle_classification.nii.gz"
-    nib.save(nib.Nifti1Image(labels, ct_nii.affine, ct_nii.header), classification_out)
-    saved_paths["classification"] = classification_out
-
-    logger.info(f"Saved {len(saved_paths)} muscle tissue masks to {output_dir}")
-
-    return saved_paths
+    saved["classification"] = save(labels, "muscle_classification.nii.gz")
+    logger.info(f"Saved {len(saved)} muscle tissue masks to {output_dir}")
+    return saved
 
 
 if __name__ == "__main__":
     import sys
-
     logging.basicConfig(level=logging.INFO)
-
     if len(sys.argv) < 5:
-        print("Usage: python muscle_analysis.py <ct_path> <envelope_path> <seg_dir> <cal_dir>")
+        print("Usage: python 04_muscle_analysis.py <ct_path> <envelope_path> <seg_dir> <cal_dir>")
         sys.exit(1)
-
-    ct_path = Path(sys.argv[1])
-    envelope_path = Path(sys.argv[2])
-    seg_dir = Path(sys.argv[3])
-    cal_dir = Path(sys.argv[4])
-
-    result = analyze_muscle(ct_path, envelope_path, seg_dir, cal_dir)
-
+    result = analyze_muscle(Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]))
     print(f"\nMuscle Analysis {'successful' if result.success else 'failed'}")
-    print(f"Compartment volume: {result.compartment_volume_cm3:.1f} cm³")
-    print(f"Muscle tissue volume: {result.muscle_tissue_volume_cm3:.1f} cm³")
-    print(f"SMD: {result.muscle_SMD_mean_hu:.1f} HU (median: {result.muscle_SMD_median_hu:.1f})")
-    print(f"Low density muscle: {result.muscle_low_density_percent:.1f}%")
-    print(f"IMAT: {result.imat_percent:.1f}% ({result.imat_volume_cm3:.1f} cm³)")
-    print(f"CSA: mean={result.muscle_CSA_mean_cm2:.1f} cm², max={result.muscle_CSA_max_cm2:.1f} cm²")
-    print(f"L/R symmetry: {result.muscle_LR_symmetry_index:.2f}")
-    print("\nQC messages:")
+    print(f"SMD: {result.muscle_SMD_mean_hu:.1f} HU, low density: {result.muscle_low_density_percent:.1f}%, "
+          f"IMAT: {result.imat_percent:.1f}%, volume: {result.muscle_tissue_volume_cm3:.1f} cm³, "
+          f"CSA: {result.muscle_CSA_mean_cm2:.1f} cm², drift {result.drift_correction_hu:+.2f} HU "
+          f"[{result.drift_correction_method}]")
     for msg in result.qc_messages:
         print(f"  {msg}")

@@ -201,3 +201,23 @@ half a day.
 - F14 kota mapping: approved, fix in the validation script with a per-subject mapping file.
 - Housekeeping done before any pipeline edit: stale summaries and L3 leftovers moved to `old/`,
   revert point tagged `v1-as-reviewed` and pushed to GitHub.
+
+## 8. Execution log
+
+- 2026-09-05: housekeeping, tag `v1-as-reviewed`, phantom tracking QC (26/26 clean, reproduction of stored
+  values exact), body-only isolation v2 QC (26/26, one watershed split in sub-111 Baseline), kota mapping fix.
+- 2026-09-06: PI approved the integration after (a) rod-boundary check (worst margin 2.1 mm inside the rod)
+  and (b) the independent test against the physicist's manual values: co-located calibration improves
+  agreement (per-vertebra change R² 0.73 -> 0.85, L1-L2 mean change RMSE 3.2 -> 2.1 mg/cm3).
+- 2026-09-06: integration implemented (utils/calibration.py, 03/04 rewritten, rerun_analysis.py with
+  manifests, 06/07 extended, 09 rapa script, Hough code deleted from 02). Pre-review results archived in
+  `Outputs/archive_v1_as_reviewed/`, `DerivedData/*/*/archive_v1_as_reviewed/`, `QC/*/*/archive_v1_as_reviewed/`.
+  Full 26-session re-run started 07:43.
+- sub-114 Z-split override: **kept** (decides which vertebrae; the body model decides the shape).
+- Open external items (Tier C): phantom certificate, vertebral-level reading, kota confirmation for
+  sub-103/104/110/112, DICOM slice thickness.
+- 2026-09-06 ~08:20: full re-run complete, 26/26 OK, masks identical to the QC'd v2 set. New Table 1:
+  L1-L2 vBMD +0.81 (-2.58, +4.19) p=.61; muscle volume -5.77 p=.060; CSA -0.90 p=.082; nothing significant.
+  Agreement with the physicist's manual vBMD: L1-L2 mean change R² 0.96, RMSE 1.4 mg/cm3 (was 0.79 / 3.2).
+  Outputs regenerated (table1, statistics_summary, ancillary_numbers, sensitivity_table, figures, validation,
+  rapa correlation, manual validation). Methods/Results, README, CLAUDE.md updated. Tag `v2-review-response`.

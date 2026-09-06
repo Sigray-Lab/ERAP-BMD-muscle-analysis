@@ -78,7 +78,7 @@ def find_adipose_masks(segmentations_dir: Path) -> Tuple[Optional[Path], Optiona
         "torso_fat.nii.gz",           # tissue_4_types output (preferred)
         "fat_visceral.nii.gz",
         "visceral_fat.nii.gz",
-        "body_trunc.nii.gz",
+        # "body_trunc" removed 2026-09: it is a whole-trunk mask, not fat (review L07)
     ]
 
     # Possible SAT label names (tissue_4_types output first, then legacy)
@@ -154,6 +154,7 @@ def check_sat_fov_adequate(sat_mask: np.ndarray,
         True if SAT is fully captured, False if truncated
     """
     z_start, z_end = z_range
+    any_sat = False
 
     for z in range(z_start, z_end + 1):
         if z >= sat_mask.shape[2]:
@@ -162,6 +163,7 @@ def check_sat_fov_adequate(sat_mask: np.ndarray,
         slice_mask = sat_mask[:, :, z]
         if not slice_mask.any():
             continue
+        any_sat = True
 
         # Check left edge (low x)
         if slice_mask[:margin_voxels, :].any():
@@ -183,6 +185,10 @@ def check_sat_fov_adequate(sat_mask: np.ndarray,
             logger.info(f"SAT touches back edge at slice {z}")
             return False
 
+    if not any_sat:
+        # No SAT voxels in the range is not evidence of full coverage (review L07)
+        logger.info("No SAT voxels in the analysed z-range; FOV adequacy unknown -> inadequate")
+        return False
     return True
 
 
