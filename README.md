@@ -134,6 +134,10 @@ Outputs/                            # results.csv, table1.*, statistics_summary.
 - **Phantom certificate.** The nominal rod densities (0/50/100/200) are program constants; the actual phantom model and certificate must be confirmed.
 - **Slice thickness.** The 1.25 mm reconstruction has 0.625 mm slice spacing; nominal thickness is not stored in the sidecars.
 
+## Manuscript handoff
+
+Current numbers for the manuscript and supplement are consolidated in `Outputs/manuscript_numbers.json`, `Outputs/table1.md` and `Outputs/ancillary_numbers.md`; the change log for the drafts is `MANUSCRIPT_UPDATE_2026-09-07.md` (not in the public repo).
+
 ## Development
 
 Developed with Claude Code (Anthropic); maintained by the [Sigray Lab](https://github.com/Sigray-Lab) at Karolinska Institutet. An adversarial technical review (2026-09) led to the body-only isolation, co-located calibration and the QC material above; see `REVISION_PLAN.md`.

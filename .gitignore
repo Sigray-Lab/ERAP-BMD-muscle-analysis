@@ -60,3 +60,7 @@ ADVERSARIAL_REVIEW_PROMPT.md
 
 # === TotalSegmentator short temp paths (macOS socket length) ===
 tmp_ts/
+
+# === Manuscript handoff / drafts with unpublished results (keep out of the public repo) ===
+MANUSCRIPT_UPDATE_*.md
+*Supplementary_draft*.md
