@@ -4,9 +4,9 @@ Analysis pipeline for quantifying trabecular bone mineral density and paraspinal
 
 ## Background
 
-Rapamycin inhibits mTOR, a central regulator of bone metabolism, muscle protein synthesis, autophagy and adipogenesis. This pipeline measures whether rapamycin treatment changes trabecular vBMD and paraspinal muscle quality/size between pre- and post-treatment CT scans of two adjacent lumbar vertebrae (L1–L2 by protocol).
+Rapamycin inhibits mTOR, a central regulator of bone metabolism, muscle protein synthesis, autophagy and adipogenesis. This pipeline quantifies pre-to-post changes in trabecular vBMD and paraspinal muscle quality/size during rapamycin treatment (uncontrolled paired design) from CT scans of two adjacent vertebral bodies (L1–L2 by protocol; absolute level not verified).
 
-Each scan includes a density calibration phantom under the patient with inserts of nominal 0, 50, 100 and 200 mg/cm³ (plus a −100 fat-equivalent insert used only for QC), enabling HU → BMD conversion per scan.
+Each scan includes a density calibration phantom under the patient: four visible rod inserts (nominal −100 fat-equivalent for QC only, 50, 100 and 200 mg/cm³) and the water-equivalent base material sampled as the 0 point. The nominal values are assigned in software; phantom model and certificate are pending confirmation.
 
 ## Pipeline Overview
 
@@ -15,7 +15,7 @@ Each scan includes a density calibration phantom under the patient with inserts 
 | 1 | `01_segmentation.py` | TotalSegmentator (`roi_subset` T10–L4 + autochthon; `tissue_4_types`), vertebra selection, body-only isolation, muscle envelope |
 | 1b | `01b_segment_vertebral_bodies.py` | TotalSegmentator `--task vertebrae_body` (vertebral bodies without the posterior arch), with a manifest per scan |
 | 2 | `manual_calibration.py` | Interactive rod clicker: one click per rod on one slice; 4 mm-radius cylinders over 9 slices. **This is how all 26 scans were calibrated.** |
-| 2b | `02_phantom_zprofile.py` | Follows the phantom tray from the clicks along z, samples every rod on every slice, writes strict QC (per-scan sheets and cohort contact sheets) |
+| 2b | `02_phantom_zprofile.py` | Follows the phantom tray from the clicks along z, samples every rod on every slice, writes screening QC (per-scan sheets and cohort contact sheets; flags are heuristics, not a certification) |
 | 2c | `02_phantom_calibration.py` | Loader for the manual calibration files (no automatic detection exists any more) |
 | 3 | `03_bone_analysis.py` | 5 mm distance-transform erosion, −50…400 HU, **per-vertebra co-located calibration** (rod means averaged over the ROI slices) |
 | 4 | `04_muscle_analysis.py` | SMD, IMAT, low-density fraction, CSA, volume; continuous half-open HU classes; co-located drift offset |
@@ -26,7 +26,7 @@ Each scan includes a density calibration phantom under the patient with inserts 
 | 9 | `08_manual_bmd_validation.py` | Pipeline vs physicist manual vBMD (per-subject kota mapping file) |
 | 10 | `09_rapa_correlation.py` | Rapamycin concentration vs Δ outcome (documented exclusions) |
 | – | `run_pipeline.py` | Orchestrator (steps 1–7 per scan, then aggregation) |
-| – | `rerun_analysis.py` | Re-run steps 3–7 from existing segmentations and calibration; writes `analysis_manifest.json` per session |
+| – | `rerun_analysis.py` | Re-run vertebra selection, body-only isolation, envelope and steps 3–7 from existing segmentations and calibration; writes `analysis_manifest.json` per session |
 
 ### Quantitative metrics
 
@@ -43,7 +43,7 @@ Each scan includes a density calibration phantom under the patient with inserts 
 
 | Metric | Unit | Description |
 |--------|------|-------------|
-| `muscle_SMD_mean_hu` | HU | Skeletal muscle density (lower = more fat infiltration) |
+| `muscle_SMD_mean_hu` | HU | Skeletal muscle density (lower values are compatible with fat infiltration; also sensitive to the base-material adjustment convention) |
 | `muscle_low_density_percent` | % | Low-density muscle [−30, 30) HU as % of muscle [−30, 150] HU |
 | `IMAT_percent` | % | Intermuscular adipose [−190, −30) HU as % of the envelope |
 | `muscle_tissue_volume_cm3` | cm³ | Muscle volume (= mean CSA × slab height) |
@@ -101,7 +101,7 @@ DerivedData/sub-XXX/ses-YYY/
 │   └── vertebrae_body/             # body-only mask, invocation.log, manifest.json
 ├── vertebral_bodies/
 │   ├── L1_body.nii.gz, L2_body.nii.gz      # body-only, endplates excluded
-│   ├── trabecular_masks/L{1,2}_trabecular.nii.gz   # the ROI actually measured
+│   ├── trabecular_masks/L{1,2}_trabecular.nii.gz   # eroded ROI actually measured (−50…400 HU filter applied on top)
 │   ├── vertebra_detection.json     # which label became L1/L2 (+ subject overrides)
 │   └── body_isolation.json         # instance assignment, splits, warnings
 ├── muscle_compartment.nii.gz       # envelope
@@ -121,22 +121,22 @@ Outputs/                            # results.csv, table1.*, statistics_summary.
 |----------|-----------|
 | Vertebral body from the `vertebrae_body` model, assigned to the selected vertebra by overlap | The whole-vertebra label's largest component includes the posterior arch in pedicle slices; the body model does not |
 | 10 % endplate exclusion on the body z-extent, then 5 mm distance-transform erosion | Excludes endplates and the cortical shell; trabecular ROI 6–17 cm³ |
-| Manual rod clicks, then tracked sampling of every rod on every slice | Automatic rod detection was unreliable; the tray can shift up to 2.9 mm over the scan; QC sheets show the circle at both ends of every scan |
-| Per-vertebra calibration from rod means over the ROI slices | Rod HU varies ~15 % along z with beam hardening from the vertebral bodies; sampling the phantom in the same slices as the bone is standard QCT practice and agreed better with independent manual measurements |
+| Manual reference clicks (four rods + base), then tracked sampling on every slice | Automatic rod detection was unreliable; the tray can shift up to 2.9 mm over the scan; QC sheets show the circle at both ends of every scan (screening, not certification) |
+| Per-vertebra calibration from reference means over the ROI slices | Rod HU varies systematically along z (up to ~15 %), consistent with beam hardening at the vertebral-body levels; averaging the references over the slices occupied by the bone ROI follows the principle of contemporaneous inline phantom calibration and agreed better with the separately calibrated manual measurements |
 | Muscle envelope: closing with a 7-voxel ball (≈4.8 mm in-plane, 4.4 mm axial) + 2D hole fill | Includes intermuscular fat at the fascial boundary |
 | Continuous half-open HU classes | The drift offset is fractional; closed integer intervals left voxels unclassified |
-| Two largest complete vertebrae, named by z position; `sub-114` Z-split override retained | TotalSegmentator labels are unreliable in an 81 mm FOV; the override was kept until the body-only path is validated on that subject |
+| Two selected target vertebrae (largest whole-vertebra labels), named by z position; `sub-114` ID-keyed Z-split override retained | TotalSegmentator labels are unreliable in an 81 mm FOV; three selected body instances touch the acquisition boundary (cores interior); the override decides which vertebrae, the body model the shape |
 | VAT/SAT not reported | SAT is truncated by the FOV in most scans and overlaps the phantom; VAT FOV adequacy was never assessed |
 
 ## Known Limitations
 
-- **Absolute vertebral level is not verified.** The two measured bodies are the same physical pair at both visits (registration Dice 0.84–0.94), but whether they are L1–L2 in every subject requires reading a wide-FOV CT; the TotalSegmentator label mapping is in `Outputs/vertebra_label_mapping.csv`.
+- **Absolute vertebral level is not verified.** The two measured bodies are the same physical pair at both visits (registration Dice 0.93–0.95 for the final body masks), but whether they are L1–L2 in every subject requires reading a wide-FOV CT; the TotalSegmentator label mapping is in `Outputs/vertebra_label_mapping.csv`.
 - **Phantom certificate.** The nominal rod densities (0/50/100/200) are program constants; the actual phantom model and certificate must be confirmed.
 - **Slice thickness.** The 1.25 mm reconstruction has 0.625 mm slice spacing; nominal thickness is not stored in the sidecars.
 
 ## Manuscript handoff
 
-Current numbers for the manuscript and supplement are consolidated in `Outputs/manuscript_numbers.json`, `Outputs/table1.md` and `Outputs/ancillary_numbers.md`; the change log for the drafts is `MANUSCRIPT_UPDATE_2026-09-07.md` (not in the public repo).
+Current numbers for the manuscript and supplement are consolidated by `Scripts/11_manuscript_numbers.py` into `Outputs/manuscript_numbers.json` and `Outputs/supplementary_tables.md` (sources: Table 1 and ancillary numbers from `07_statistics_summary.py`, manual validation from `08`, exposure correlations from `09`, calibration-convention sensitivity from `10`); the change log for the drafts is `MANUSCRIPT_UPDATE_2026-09-07.md` (not in the public repo).
 
 ## Development
 

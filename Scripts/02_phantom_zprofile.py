@@ -40,6 +40,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
@@ -82,6 +83,13 @@ def annulus_mask(shape, c0, c1, r_in, r_out):
     i, j = np.ogrid[:shape[0], :shape[1]]
     d2 = (i - c0) ** 2 + (j - c1) ** 2
     return (d2 > r_in ** 2) & (d2 <= r_out ** 2)
+
+
+def _sha256(p: Path):
+    try:
+        return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+    except Exception:
+        return None
 
 
 def core_zrange(vb_dir: Path, level: str):
@@ -222,8 +230,15 @@ def process_session(sub, ses, data_dir: Path, root: Path):
             **{f"{k}_sd_hu": [None if np.isnan(v) else round(float(v), 2) for v in sd[k]] for k in ROD_ORDER},
             **{f"{k}_edge_hu": [None if np.isnan(v) else round(float(v), 2) for v in edge[k]] for k in ROD_ORDER},
         },
-        "cores_used_for_calibration": cores,
-        "calibration": calib,
+        "informational_at_profile_time": {
+            "note": ("Computed from the trabecular masks present when this profile was built; NOT the "
+                     "calibration used by the pipeline. The authoritative per-vertebra calibration is in "
+                     "bone_results.json (calibration_* fields) and the drift offset in muscle_results.json."),
+            "trabecular_mask_sha256": {lvl: _sha256(vb_dir / "trabecular_masks" / f"{lvl}_trabecular.nii.gz")
+                                       for lvl in ["L1", "L2"]},
+            "cores": cores,
+            "calibration": calib,
+        },
     }
     json.dump(out, open(derived / "phantom_zprofile.json", "w"), indent=1)
 

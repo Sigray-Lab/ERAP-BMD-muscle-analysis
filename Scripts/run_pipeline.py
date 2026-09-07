@@ -83,12 +83,14 @@ def find_ct_scans(data_dir: Path, subject_filter: Optional[str] = None) -> List[
             if not session_dir.exists():
                 continue
 
-            # Find 1.25mm CT (preferred resolution)
-            ct_files = list(session_dir.glob("*_rec-stnd1.25mm_ct.nii.gz"))
-
-            if ct_files:
-                ct_path = ct_files[0]
-                scans.append((subject_id, session, ct_path))
+            # Exactly one 1.25 mm CT per session; ambiguity is an error (review L08 / R2-L01)
+            ct_files = sorted(session_dir.glob("*_rec-stnd1.25mm_ct.nii.gz"))
+            if len(ct_files) == 1:
+                scans.append((subject_id, session, ct_files[0]))
+            elif len(ct_files) > 1:
+                raise FileNotFoundError(f"{subject_id}/{session}: {len(ct_files)} CTs match "
+                                        f"*_rec-stnd1.25mm_ct.nii.gz; expected exactly one: "
+                                        + ", ".join(f.name for f in ct_files))
 
     return scans
 
@@ -351,14 +353,12 @@ def process_single_scan(subject_id: str,
     )
 
     # Provenance manifest
-    try:
-        import subprocess
-        from importlib.metadata import version as _v
-        commit = subprocess.check_output(["git", "-C", str(SCRIPTS_DIR.parent), "rev-parse", "HEAD"], text=True).strip()
-    except Exception:
-        commit = "unknown"
+    from utils.provenance import provenance
+    prov = provenance()
     manifest = {"subject": subject_id, "session": session, "ct": str(ct_path), "script": "run_pipeline.py",
-                "finished": datetime.now().isoformat(), "git_commit": commit,
+                "finished": datetime.now().isoformat(), "git_commit": prov["git_commit"],
+                "git_dirty_scripts": prov["git_dirty_scripts"], "scripts_tree_sha256": prov["scripts_tree_sha256"],
+                "provenance_note": prov["note"],
                 "success": results["success"], "errors": results["errors"],
                 "steps": {k: results[k] for k in ["segmentation", "calibration", "phantom_tracking", "bone",
                                                   "muscle", "adipose", "validation"] if k in results}}

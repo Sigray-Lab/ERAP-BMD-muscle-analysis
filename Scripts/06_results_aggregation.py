@@ -315,14 +315,14 @@ def aggregate_results(derived_data_dir: Path,
     # Save CSV + provenance manifest
     df.to_csv(output_path, index=False)
     logger.info(f"Results saved to {output_path}")
-    try:
-        import subprocess
-        from datetime import datetime
-        commit = subprocess.check_output(["git", "-C", str(Path(__file__).resolve().parent.parent),
-                                          "rev-parse", "HEAD"], text=True).strip()
-    except Exception:
-        commit = "unknown"
-    manifest = {"timestamp": datetime.now().isoformat(), "git_commit": commit,
+    from datetime import datetime
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from utils.provenance import provenance
+    prov = provenance()
+    manifest = {"timestamp": datetime.now().isoformat(), "git_commit": prov["git_commit"],
+                "git_dirty_scripts": prov["git_dirty_scripts"], "scripts_tree_sha256": prov["scripts_tree_sha256"],
+                "provenance_note": prov["note"],
                 "n_subjects": int(len(df)),
                 "n_complete_pairs": int((df["has_baseline"] & df["has_followup"]).sum()),
                 "bone_calibration_methods": sorted(set(str(v) for v in df.get("pre_bone_calibration_method", pd.Series(dtype=str)).dropna())),

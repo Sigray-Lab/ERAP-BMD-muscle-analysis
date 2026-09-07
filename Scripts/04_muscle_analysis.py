@@ -267,8 +267,13 @@ def analyze_muscle(ct_path: Path,
     logger.info(f"Muscle analysis: SMD={smd_mean:.1f} HU, low density={muscle_low_pct:.1f}%, "
                 f"IMAT={imat_pct:.1f}%, volume={muscle_all_vol:.1f} cm³, CSA={csa_mean:.1f} cm²")
 
+    # Success requires finite mandatory endpoints, not merely a non-empty envelope (review R2-L03)
+    success = bool(muscle_hu.size > 0 and np.isfinite(smd_mean) and csa_mean > 0 and muscle_all_vol > 0)
+    if not success:
+        qc_messages.append("ERROR: no valid muscle voxels in the envelope; muscle endpoints undefined")
+
     return MuscleAnalysisResult(
-        success=True,
+        success=success,
         compartment_volume_cm3=compartment_volume_cm3,
         muscle_tissue_volume_cm3=muscle_all_vol,
         muscle_normal_volume_cm3=muscle_normal_vol,

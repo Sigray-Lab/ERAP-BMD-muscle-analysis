@@ -104,11 +104,12 @@ def main():
     fig.suptitle(f"Change in CT outcomes vs rapamycin concentration; open circles = excluded ({', '.join(sorted(EXCLUDE))})", fontsize=11)
     fig.tight_layout(rect=[0, 0, 1, 0.95]); fig.savefig(FIG / "rapa_conc_vs_change.png", dpi=150); plt.close(fig)
 
-    try:
-        commit = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
-    except Exception:
-        commit = "unknown"
-    json.dump({"timestamp": datetime.now().isoformat(), "git_commit": commit,
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from utils.provenance import provenance
+    prov = provenance()
+    json.dump({"timestamp": datetime.now().isoformat(), "git_commit": prov["git_commit"],
+               "git_dirty_scripts": prov["git_dirty_scripts"], "scripts_tree_sha256": prov["scripts_tree_sha256"],
                "exposure_file": str(OUTCOMES_CSV), "exposure_sha256": sha256(OUTCOMES_CSV),
                "exposure_column": "rapa_conc_48h", "results_file": "Outputs/results.csv",
                "excluded": EXCLUDE, "n_primary": int(len(primary)), "n_all": int(len(merged))},

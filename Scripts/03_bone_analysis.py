@@ -68,6 +68,8 @@ class VertebralBMDResult:
     calibration_rod_mean_hu: Optional[dict] = None
     # same ROI, original click-slice calibration (sensitivity)
     vBMD_mean_z50_calibration_mgcm3: float = np.nan
+    # calibration fallback (None when the intended method was used)
+    calibration_fallback_reason: Optional[str] = None
     # erosion actually applied (fallbacks are recorded, not hidden)
     erosion_mm_used: float = np.nan
     roi_z_min: Optional[int] = None
@@ -167,11 +169,13 @@ def analyze_vertebra(body_nii: nib.Nifti1Image,
     # Only voxels inside the ROI slices contribute; use the slices the valid voxels occupy.
     valid_voxel_z = np.where(trabecular_mask)[2][valid_mask]
     cal = None
+    fallback_reason = None
     if zprofile is not None:
         try:
             cal = calibration_for_slices(zprofile, np.unique(valid_voxel_z))
         except ValueError as e:
-            logger.warning(f"{vertebra_name}: co-located calibration unavailable ({e}); using click-slice calibration")
+            fallback_reason = f"co-located calibration unavailable ({e}); click-slice calibration used"
+            logger.warning(f"{vertebra_name}: {fallback_reason}")
     if cal is None:
         cal = {"method": z50["method"], "slope": z50["slope"], "intercept": z50["intercept"],
                "r_squared": z50["r_squared"], "z_min": None, "z_max": None, "n_slices": None, "rod_mean_hu": None}
@@ -201,6 +205,7 @@ def analyze_vertebra(body_nii: nib.Nifti1Image,
         calibration_n_slices=cal.get("n_slices"),
         calibration_rod_mean_hu=cal.get("rod_mean_hu"),
         vBMD_mean_z50_calibration_mgcm3=bmd_z50,
+        calibration_fallback_reason=fallback_reason,
         erosion_mm_used=erosion_used,
         roi_z_min=roi_z[0], roi_z_max=roi_z[1],
     )
@@ -269,6 +274,17 @@ def analyze_bone(ct_path: Path,
             qc_messages.append(f"WARNING: {name} erosion fell back to {res.erosion_mm_used} mm")
         if res.calibration_r_squared < 0.99:
             qc_messages.append(f"WARNING: {name} calibration R² = {res.calibration_r_squared:.4f} < 0.99")
+        if res.calibration_fallback_reason:
+            qc_messages.append(f"WARNING: {name} {res.calibration_fallback_reason}")
+
+    # Top-level method is derived from what was actually applied per vertebra (review R2-L04)
+    used = {name: r.calibration_method for name, r in results.items() if r is not None}
+    if used and all(m.startswith("co-located") for m in used.values()):
+        method = "co-located (per-vertebra, tracked rods over ROI slices)"
+    elif used and all(m.startswith("click") for m in used.values()):
+        method = "click slice (9 slices around z0)"
+    elif used:
+        method = "mixed: " + "; ".join(f"{k}={v}" for k, v in used.items())
 
     l1, l2 = results["L1"], results["L2"]
     l1l2_mean = l1l2_weighted = l1l2_z50 = None

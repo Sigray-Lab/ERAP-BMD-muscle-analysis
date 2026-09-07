@@ -23,6 +23,22 @@ from skimage.morphology import ball
 logger = logging.getLogger(__name__)
 
 
+def _mask_readable(p: Path) -> bool:
+    """File exists and loads as a NIfTI with a 3-D array."""
+    try:
+        return p.exists() and p.stat().st_size > 0 and np.asarray(nib.load(p).dataobj).ndim == 3
+    except Exception:
+        return False
+
+
+def _mask_nonempty(p: Path) -> bool:
+    """File is readable and contains at least one non-zero voxel."""
+    try:
+        return _mask_readable(p) and bool(np.asarray(nib.load(p).dataobj).any())
+    except Exception:
+        return False
+
+
 def check_totalsegmentator_output_exists(output_dir: Path, task: str = "roi_subset") -> bool:
     """
     Check if TotalSegmentator output already exists.
@@ -37,22 +53,18 @@ def check_totalsegmentator_output_exists(output_dir: Path, task: str = "roi_subs
     if task == "roi_subset":
         # Both muscle sides and at least two non-empty vertebra masks (review L02:
         # an empty or half-written directory must not count as complete).
-        def _nonempty(p: Path) -> bool:
-            try:
-                return p.exists() and bool(np.asarray(nib.load(p).dataobj).any())
-            except Exception:
-                return False
-        vertebrae_found = sum(_nonempty(output_dir / f"{lab}.nii.gz") for lab in
+        vertebrae_found = sum(_mask_nonempty(output_dir / f"{lab}.nii.gz") for lab in
                               ["vertebrae_T10", "vertebrae_T11", "vertebrae_T12",
                                "vertebrae_L1", "vertebrae_L2", "vertebrae_L3", "vertebrae_L4"])
-        muscle_ok = ((_nonempty(output_dir / "autochthon_left.nii.gz") and _nonempty(output_dir / "autochthon_right.nii.gz")) or
-                     (_nonempty(output_dir / "erector_spinae_left.nii.gz") and _nonempty(output_dir / "erector_spinae_right.nii.gz")))
+        muscle_ok = ((_mask_nonempty(output_dir / "autochthon_left.nii.gz") and _mask_nonempty(output_dir / "autochthon_right.nii.gz")) or
+                     (_mask_nonempty(output_dir / "erector_spinae_left.nii.gz") and _mask_nonempty(output_dir / "erector_spinae_right.nii.gz")))
         return vertebrae_found >= 2 and muscle_ok
 
     elif task == "vertebrae_body":
         m = output_dir / "vertebrae_body" / "manifest.json"
         try:
-            return (output_dir / "vertebrae_body" / "vertebrae_body.nii.gz").exists() and json.load(open(m)).get("exit_code") == 0
+            return (json.load(open(m)).get("exit_code") == 0
+                    and _mask_nonempty(output_dir / "vertebrae_body" / "vertebrae_body.nii.gz"))
         except Exception:
             return False
 
@@ -65,14 +77,12 @@ def check_totalsegmentator_output_exists(output_dir: Path, task: str = "roi_subs
         )
 
     elif task == "tissue_4_types":
-        # Check for tissue_4_types outputs (VAT, SAT, muscle, IMAT)
-        required_files = [
-            "torso_fat.nii.gz",           # VAT
-            "subcutaneous_fat.nii.gz",    # SAT
-            "skeletal_muscle.nii.gz",     # Muscle
-            "intermuscular_fat.nii.gz"    # IMAT
-        ]
-        return all((output_dir / f).exists() for f in required_files)
+        # Muscle and IMAT must be readable and non-empty; the two fat masks must be
+        # readable (they may legitimately be empty in a narrow FOV) (review R2-L02).
+        return (_mask_nonempty(output_dir / "skeletal_muscle.nii.gz")
+                and _mask_nonempty(output_dir / "intermuscular_fat.nii.gz")
+                and _mask_readable(output_dir / "torso_fat.nii.gz")
+                and _mask_readable(output_dir / "subcutaneous_fat.nii.gz"))
 
     return False
 

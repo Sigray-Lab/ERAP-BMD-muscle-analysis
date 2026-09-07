@@ -52,6 +52,7 @@ adipose_analysis = import_module("05_adipose_analysis")
 tissue_validation = import_module("07_tissue_validation")
 from utils.qc_visualization import generate_all_qc_images  # noqa: E402
 from utils.vertebra_detection import detect_central_vertebrae, standardize_vertebrae, save_detection_result  # noqa: E402
+from utils.provenance import provenance  # noqa: E402
 
 PROJECT_ROOT = SCRIPTS_DIR.parent
 RAW_DATA = PROJECT_ROOT.parent / "RawData" / "bmd_ct"
@@ -129,9 +130,11 @@ def process_session(subject_id: str, session: str, skip_sat: bool = False) -> bo
     qc_dir = QC_DIR / subject_id / session
     seg_dir = derived_dir / "segmentations"
     vb_dir = derived_dir / "vertebral_bodies"
+    prov = provenance()
     manifest = {"subject": subject_id, "session": session, "started": datetime.now().isoformat(),
-                "script": Path(__file__).name, "git_commit": git_commit(), "packages": package_versions(),
-                "steps": {}}
+                "script": Path(__file__).name, "git_commit": prov["git_commit"],
+                "git_dirty_scripts": prov["git_dirty_scripts"], "scripts_tree_sha256": prov["scripts_tree_sha256"],
+                "provenance_note": prov["note"], "packages": package_versions(), "steps": {}}
 
     try:
         ct_path = find_ct_path(subject_id, session)
